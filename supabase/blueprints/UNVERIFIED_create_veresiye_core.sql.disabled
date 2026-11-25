@@ -1,0 +1,235 @@
+/*
+ * NOT APPROVED FOR DEPLOYMENT.
+ * This was generated before the owner ProPOS schema was inspected.
+ * It may create duplicate ledger tables and contains an unsafe first-admin bootstrap.
+ * It has been retained only for review/history and is intentionally outside migrations.
+ */
+
+/*
+# Create the production credit-account foundation
+
+1. New tables
+- `admin_profiles`: Supabase Auth users allowed into the private administration area and the shop name.
+- `customer_accounts`: customer names, hashed six-digit codes, access status, and failed-login lockouts.
+- `credit_transactions`: one veresiye sale and its source-system idempotency key.
+- `credit_transaction_items`: product name, quantity, and unit price for each sale line.
+- `payments`: private payment records used only to calculate balances.
+
+2. Security
+- RLS is enabled on every table with separate SELECT, INSERT, UPDATE, and DELETE policies.
+- Raw customer codes are never stored. Five failed attempts create a fifteen-minute lockout.
+- Customers use only a controlled login function; direct anonymous table reads are not granted.
+- Administrator functions verify the authenticated user through `admin_profiles` and use a fixed search path.
+
+3. Integration
+- `credit_transactions.source_id` and `payments.source_id` are unique per customer so retries cannot duplicate sales or payments.
+- The public schema was empty, so this migration creates new objects only and does not alter existing sales data.
+*/
+
+CREATE TABLE IF NOT EXISTS public.admin_profiles (
+  id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role text NOT NULL DEFAULT 'admin' CHECK (role = 'admin'),
+  store_name text NOT NULL DEFAULT 'Ferhat Büfe',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS public.customer_accounts (
+  id uuid PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  full_name text NOT NULL CHECK (char_length(btrim(full_name)) BETWEEN 2 AND 120),
+  access_code_hash text NOT NULL,
+  is_active boolean NOT NULL DEFAULT true,
+  failed_attempts integer NOT NULL DEFAULT 0 CHECK (failed_attempts >= 0),
+  locked_until timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS public.credit_transactions (
+  id uuid PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  customer_id uuid NOT NULL REFERENCES public.customer_accounts(id) ON DELETE RESTRICT,
+  source_id text NOT NULL,
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (customer_id, source_id)
+);
+CREATE TABLE IF NOT EXISTS public.credit_transaction_items (
+  id uuid PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  transaction_id uuid NOT NULL REFERENCES public.credit_transactions(id) ON DELETE RESTRICT,
+  product_name text NOT NULL CHECK (char_length(btrim(product_name)) BETWEEN 1 AND 160),
+  quantity integer NOT NULL CHECK (quantity > 0 AND quantity <= 10000),
+  unit_price numeric(12,2) NOT NULL CHECK (unit_price >= 0)
+);
+CREATE TABLE IF NOT EXISTS public.payments (
+  id uuid PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
+  customer_id uuid NOT NULL REFERENCES public.customer_accounts(id) ON DELETE RESTRICT,
+  source_id text NOT NULL,
+  amount numeric(12,2) NOT NULL CHECK (amount > 0),
+  paid_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (customer_id, source_id)
+);
+CREATE INDEX IF NOT EXISTS credit_transactions_customer_time_idx ON public.credit_transactions (customer_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS credit_transaction_items_transaction_idx ON public.credit_transaction_items (transaction_id);
+CREATE INDEX IF NOT EXISTS payments_customer_time_idx ON public.payments (customer_id, paid_at DESC);
+
+ALTER TABLE public.admin_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customer_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.credit_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.credit_transaction_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+AS $$ SELECT EXISTS (SELECT 1 FROM public.admin_profiles WHERE id = auth.uid() AND role = 'admin'); $$;
+
+CREATE OR REPLACE FUNCTION public.customer_login(p_code text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, extensions
+AS $$
+DECLARE
+  v_customer public.customer_accounts%ROWTYPE;
+  v_hash text;
+  v_transactions jsonb;
+  v_balance numeric(12,2);
+BEGIN
+  IF p_code IS NULL OR p_code !~ '^[0-9]{6}$' THEN
+    RETURN jsonb_build_object('success', false, 'message', 'Kod geçersiz veya geçici olarak kullanılamıyor.');
+  END IF;
+  v_hash := encode(extensions.digest(convert_to(p_code, 'UTF8'), 'sha256'), 'hex');
+  SELECT * INTO v_customer FROM public.customer_accounts WHERE access_code_hash = v_hash LIMIT 1;
+  IF NOT FOUND OR NOT v_customer.is_active OR (v_customer.locked_until IS NOT NULL AND v_customer.locked_until > now()) THEN
+    IF FOUND AND v_customer.locked_until IS NULL THEN
+      UPDATE public.customer_accounts
+      SET failed_attempts = failed_attempts + 1,
+          locked_until = CASE WHEN failed_attempts + 1 >= 5 THEN now() + interval '15 minutes' ELSE NULL END,
+          updated_at = now()
+      WHERE id = v_customer.id;
+    END IF;
+    RETURN jsonb_build_object('success', false, 'message', 'Kod geçersiz veya geçici olarak kullanılamıyor.');
+  END IF;
+  UPDATE public.customer_accounts SET failed_attempts = 0, locked_until = NULL, updated_at = now() WHERE id = v_customer.id;
+  SELECT COALESCE(SUM(i.quantity * i.unit_price), 0) - COALESCE((SELECT SUM(amount) FROM public.payments WHERE customer_id = v_customer.id), 0)
+  INTO v_balance
+  FROM public.credit_transactions t LEFT JOIN public.credit_transaction_items i ON i.transaction_id = t.id WHERE t.customer_id = v_customer.id;
+  SELECT COALESCE(jsonb_agg(transaction_data ORDER BY occurred_at DESC), '[]'::jsonb) INTO v_transactions
+  FROM (
+    SELECT t.occurred_at,
+      jsonb_build_object(
+        'id', t.id,
+        'date', to_char(t.occurred_at AT TIME ZONE 'Europe/Istanbul', 'DD FMMonth YYYY'),
+        'time', to_char(t.occurred_at AT TIME ZONE 'Europe/Istanbul', 'HH24:MI'),
+        'total', COALESCE(SUM(i.quantity * i.unit_price), 0),
+        'items', COALESCE(jsonb_agg(jsonb_build_object('product', i.product_name, 'quantity', i.quantity, 'unitPrice', i.unit_price) ORDER BY i.id) FILTER (WHERE i.id IS NOT NULL), '[]'::jsonb)
+      ) AS transaction_data
+    FROM public.credit_transactions t LEFT JOIN public.credit_transaction_items i ON i.transaction_id = t.id
+    WHERE t.customer_id = v_customer.id GROUP BY t.id, t.occurred_at
+  ) transactions;
+  RETURN jsonb_build_object('success', true, 'customer', jsonb_build_object('id', v_customer.id, 'name', v_customer.full_name, 'balance', GREATEST(v_balance, 0)), 'transactions', v_transactions);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.register_admin_profile()
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Not authorized'; END IF;
+  IF EXISTS (SELECT 1 FROM public.admin_profiles) AND NOT public.is_admin() THEN RAISE EXCEPTION 'Not authorized'; END IF;
+  INSERT INTO public.admin_profiles (id) VALUES (auth.uid()) ON CONFLICT (id) DO NOTHING;
+  RETURN true;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_list_customers()
+RETURNS TABLE (id uuid, full_name text, access_code_hint text, balance numeric, last_activity timestamptz, is_active boolean)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Not authorized'; END IF;
+  RETURN QUERY SELECT c.id, c.full_name, '••••••'::text,
+    GREATEST(COALESCE((SELECT SUM(i.quantity * i.unit_price) FROM public.credit_transactions t JOIN public.credit_transaction_items i ON i.transaction_id = t.id WHERE t.customer_id = c.id), 0) - COALESCE((SELECT SUM(p.amount) FROM public.payments p WHERE p.customer_id = c.id), 0), 0),
+    (SELECT t.occurred_at FROM public.credit_transactions t WHERE t.customer_id = c.id ORDER BY t.occurred_at DESC LIMIT 1), c.is_active
+  FROM public.customer_accounts c ORDER BY c.created_at DESC;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_create_customer(p_full_name text, p_code text)
+RETURNS TABLE (id uuid, full_name text, access_code_hint text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  v_id uuid;
+  v_full_name text;
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Not authorized'; END IF;
+  IF p_full_name IS NULL OR btrim(p_full_name) = '' OR p_code IS NULL OR p_code !~ '^[0-9]{6}$' THEN RAISE EXCEPTION 'Invalid input'; END IF;
+  IF EXISTS (SELECT 1 FROM public.customer_accounts WHERE access_code_hash = encode(extensions.digest(convert_to(p_code, 'UTF8'), 'sha256'), 'hex')) THEN RAISE EXCEPTION 'Code already exists'; END IF;
+  INSERT INTO public.customer_accounts (full_name, access_code_hash)
+  VALUES (btrim(p_full_name), encode(extensions.digest(convert_to(p_code, 'UTF8'), 'sha256'), 'hex'))
+  RETURNING customer_accounts.id, customer_accounts.full_name INTO v_id, v_full_name;
+  RETURN QUERY SELECT v_id, v_full_name, '••••••'::text;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_set_customer_active(p_customer_id uuid, p_is_active boolean)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path = public
+AS $$
+BEGIN
+  IF NOT public.is_admin() THEN RAISE EXCEPTION 'Not authorized'; END IF;
+  UPDATE public.customer_accounts SET is_active = p_is_active, updated_at = now() WHERE id = p_customer_id;
+  RETURN FOUND;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.is_admin() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.is_admin() TO authenticated;
+REVOKE ALL ON FUNCTION public.customer_login(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.customer_login(text) TO anon, authenticated;
+REVOKE ALL ON FUNCTION public.register_admin_profile() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.register_admin_profile() TO authenticated;
+REVOKE ALL ON FUNCTION public.admin_list_customers() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_list_customers() TO authenticated;
+REVOKE ALL ON FUNCTION public.admin_create_customer(text, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_create_customer(text, text) TO authenticated;
+REVOKE ALL ON FUNCTION public.admin_set_customer_active(uuid, boolean) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_set_customer_active(uuid, boolean) TO authenticated;
+
+GRANT SELECT ON public.admin_profiles TO authenticated;
+GRANT SELECT ON public.customer_accounts, public.credit_transactions, public.credit_transaction_items, public.payments TO authenticated;
+
+DROP POLICY IF EXISTS "admins_read_profiles" ON public.admin_profiles;
+CREATE POLICY "admins_read_profiles" ON public.admin_profiles FOR SELECT TO authenticated USING (id = auth.uid() OR public.is_admin());
+DROP POLICY IF EXISTS "admins_insert_profiles" ON public.admin_profiles;
+CREATE POLICY "admins_insert_profiles" ON public.admin_profiles FOR INSERT TO authenticated WITH CHECK (id = auth.uid() AND (NOT EXISTS (SELECT 1 FROM public.admin_profiles) OR public.is_admin()));
+DROP POLICY IF EXISTS "admins_update_profiles" ON public.admin_profiles;
+CREATE POLICY "admins_update_profiles" ON public.admin_profiles FOR UPDATE TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_delete_profiles" ON public.admin_profiles;
+CREATE POLICY "admins_delete_profiles" ON public.admin_profiles FOR DELETE TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_read_customers" ON public.customer_accounts;
+CREATE POLICY "admins_read_customers" ON public.customer_accounts FOR SELECT TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_insert_customers" ON public.customer_accounts;
+CREATE POLICY "admins_insert_customers" ON public.customer_accounts FOR INSERT TO authenticated WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_update_customers" ON public.customer_accounts;
+CREATE POLICY "admins_update_customers" ON public.customer_accounts FOR UPDATE TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_delete_customers" ON public.customer_accounts;
+CREATE POLICY "admins_delete_customers" ON public.customer_accounts FOR DELETE TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_read_transactions" ON public.credit_transactions;
+CREATE POLICY "admins_read_transactions" ON public.credit_transactions FOR SELECT TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_insert_transactions" ON public.credit_transactions;
+CREATE POLICY "admins_insert_transactions" ON public.credit_transactions FOR INSERT TO authenticated WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_update_transactions" ON public.credit_transactions;
+CREATE POLICY "admins_update_transactions" ON public.credit_transactions FOR UPDATE TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_delete_transactions" ON public.credit_transactions;
+CREATE POLICY "admins_delete_transactions" ON public.credit_transactions FOR DELETE TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_read_transaction_items" ON public.credit_transaction_items;
+CREATE POLICY "admins_read_transaction_items" ON public.credit_transaction_items FOR SELECT TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_insert_transaction_items" ON public.credit_transaction_items;
+CREATE POLICY "admins_insert_transaction_items" ON public.credit_transaction_items FOR INSERT TO authenticated WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_update_transaction_items" ON public.credit_transaction_items;
+CREATE POLICY "admins_update_transaction_items" ON public.credit_transaction_items FOR UPDATE TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_delete_transaction_items" ON public.credit_transaction_items;
+CREATE POLICY "admins_delete_transaction_items" ON public.credit_transaction_items FOR DELETE TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_read_payments" ON public.payments;
+CREATE POLICY "admins_read_payments" ON public.payments FOR SELECT TO authenticated USING (public.is_admin());
+DROP POLICY IF EXISTS "admins_insert_payments" ON public.payments;
+CREATE POLICY "admins_insert_payments" ON public.payments FOR INSERT TO authenticated WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_update_payments" ON public.payments;
+CREATE POLICY "admins_update_payments" ON public.payments FOR UPDATE TO authenticated USING (public.is_admin()) WITH CHECK (public.is_admin());
+DROP POLICY IF EXISTS "admins_delete_payments" ON public.payments;
+CREATE POLICY "admins_delete_payments" ON public.payments FOR DELETE TO authenticated USING (public.is_admin());

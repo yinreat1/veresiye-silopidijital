@@ -1,0 +1,7 @@
+project_id = "ukfeuojhigxxxlnhsmls"
+
+[functions.veresiye-portal-admin]
+verify_jwt = false
+
+[functions.veresiye-portal-login]
+verify_jwt = false

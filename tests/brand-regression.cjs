@@ -1,0 +1,18 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const app = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
+const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+const serviceWorker = fs.readFileSync(path.join(root, 'public/sw.js'), 'utf8');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'public/manifest.webmanifest'), 'utf8'));
+assert.match(app, /src=\"\/silopi-dijital-logo\.png\"/, 'The exact Yunus ProPOS horizontal logo must be used in the portal');
+assert.match(app, /src=\"\/icon-512\.png\"/, 'Compact brand positions must use the original Yunus ProPOS app icon');
+assert.equal(fs.existsSync(path.join(root, 'public/silopi-dijital-logo.png')), true, 'Official full logo asset must be present');
+assert.equal(fs.existsSync(path.join(root, 'public/silopi-dijital-mark.png')), false, 'Substituted mark must not be used');
+assert.match(html, /<meta name="mobile-web-app-capable" content="yes"\s*\/>/, 'Standard mobile web app capability meta must exist');
+assert.match(html, /silopi-dijital-logo\.png/, 'Social preview must use the official ProPOS logo');
+assert.match(html, /<meta name="apple-mobile-web-app-capable" content="yes"\s*\/>/, 'Apple-specific PWA capability meta must remain for iOS');
+assert.ok(manifest.icons.some((icon) => icon.src === '/icon-512.png'), 'Original app icon must remain in PWA manifest');
+assert.match(serviceWorker, /silopi-veresiye-v8/, 'Service worker cache must be bumped so installed PWAs update the new API-enabled shell');
+console.log('PASS: Exact Yunus ProPOS logo and app icon reused; substituted portal logo removed; standard and Apple PWA metadata present; service worker cache version bumped.');

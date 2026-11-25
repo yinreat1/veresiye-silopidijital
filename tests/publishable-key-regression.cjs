@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const expected = 'sb_publishable_b-cFhb97kOd3mLQnBi_SGQ_8oNQPkzS';
+const vite = fs.readFileSync(path.join(root, 'vite.config.ts'), 'utf8');
+const vercel = fs.readFileSync(path.join(root, 'api/veresiye/[function].ts'), 'utf8');
+assert.match(vite, new RegExp(expected.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')));
+assert.match(vercel, new RegExp(expected.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')));
+assert.doesNotMatch(vite, /loadEnv\(|SUPABASE_PUBLISHABLE_KEY\s*\|\|/);
+assert.doesNotMatch(vercel, /process\.env\.SUPABASE_PUBLISHABLE_KEY/);
+assert.doesNotMatch(vite + vercel, /sb_publishable_b-CFhb/);
+console.log('PASS: exact current Supabase publishable key is used in Vite and Vercel server-side proxies; stale env overrides/casing cannot replace it.');

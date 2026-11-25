@@ -1,0 +1,56 @@
+{
+  "name": "silopidijital-veresiye",
+  "private": true,
+  "version": "0.2.9",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:vercel": "vercel dev",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "typecheck:api": "tsc --noEmit -p tsconfig.api.json",
+    "check": "npm run typecheck && npm run typecheck:api && npm run typecheck:node && npm run lint && npm run test:security && npm run test:edge-routing && npm run test:vercel && npm run test:http && npm run test:brand && npm run test:guidance && npm run test:remember && npm run test:dev-proxy && npm run test:vite-dev-http && npm run test:session-crypto && npm run test:publishable-key && npm run build",
+    "test:security": "node scripts/check-security.mjs",
+    "test:vercel": "node tests/vercel-proxy-contract.cjs",
+    "test:http": "node tests/vercel-proxy-http-smoke.cjs",
+    "test:brand": "node tests/brand-regression.cjs",
+    "test:edge-routing": "node tests/edge-routing-regression.cjs",
+    "test:guidance": "node tests/login-code-guidance-regression.cjs",
+    "test:remember": "node tests/remember-session-regression.cjs",
+    "test:dev-proxy": "node tests/vite-dev-proxy-regression.cjs",
+    "test:session-crypto": "node tests/session-token-crypto-regression.cjs",
+    "test:vite-dev-http": "node tests/vite-dev-api-http-smoke.cjs",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "test:publishable-key": "node tests/publishable-key-regression.cjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "@types/qrcode": "^1.5.6",
+    "lucide-react": "^0.446.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.9.1",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "autoprefixer": "^10.4.18",
+    "eslint": "^9.9.1",
+    "eslint-plugin-react-hooks": "^5.1.0-rc.0",
+    "eslint-plugin-react-refresh": "^0.4.11",
+    "globals": "^15.9.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.5.3",
+    "typescript-eslint": "^8.3.0",
+    "vite": "^7.3.7"
+  },
+  "description": "Silopi Dijital Veresiye - Ferhat Büfe customer credit portal",
+  "engines": {
+    "node": "22.x"
+  }
+}

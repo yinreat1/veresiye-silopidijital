@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const config = fs.readFileSync(path.join(root, 'vite.config.ts'), 'utf8');
+assert.match(config, /configureServer\(server:/);
+assert.match(config, /server\.middlewares\.use/);
+assert.match(config, /\/api\/veresiye\//);
+assert.match(config, /veresiye-portal-login/);
+assert.match(config, /veresiye-portal-admin/);
+assert.match(config, /functions\/v1\/\$\{route\}/);
+assert.match(config, /route === 'health'/);
+assert.match(config, /MAX_BODY_BYTES/);
+assert.doesNotMatch(config, /silopidijital-veresiye-app\.a83386928\.workers\.dev/);
+console.log('PASS: Vite dev middleware handles /api/veresiye health + POST locally and forwards server-side to the Supabase Edge Functions.');

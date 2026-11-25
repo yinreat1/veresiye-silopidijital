@@ -1,0 +1,22 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const root = path.resolve(__dirname, '..');
+const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+const app = read('src/App.tsx');
+const loginFunction = read('supabase/functions/veresiye-portal-login/index.ts');
+const healthLib = read('src/lib/veresiye.ts');
+const logo = fs.readFileSync(path.join(root, 'public/silopi-dijital-logo.png'));
+const icon = fs.readFileSync(path.join(root, 'public/icon-512.png'));
+const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
+assert.match(app, /Beni hatırla/, 'Customer login must expose the remember-me option.');
+assert.doesNotMatch(app, /Hangi kodu girmeliyim|WEB ERİŞİMİ AÇIK sadece izin durumu/,
+  'The user-requested explanatory customer instructions must be removed from the login screen.');
+assert.match(app, /onHealthCheck=\{handlePortalHealthCheck\}/, 'Customer login screen must expose the connection health action.');
+assert.match(healthLib, /\/api\/veresiye\/health/, 'Health action must query the same-origin health endpoint.');
+assert.match(loginFunction, /verifyCustomerSessionToken/, 'Login Edge Function must support remembered sessions.');
+assert.match(loginFunction, /\.eq\('is_active', true\)/, 'Remembered sessions must re-check current portal access.');
+assert.equal(hash(logo), '57fb19df4826107ce91041d453472216aca77bebe7987ba3903c3b731b318ddd', 'Full logo must be byte-identical to the Yunus ProPOS official wordmark.');
+assert.equal(hash(icon), '6b05aadd4e16aa794e6badfb47504ec65dbef352f2dfe12f9a93f97d40c18eaa', 'PWA app icon must be byte-identical to the Yunus ProPOS official app icon.');
+console.log('PASS: concise login screen, remember-me UI, active-access check, health action, and original Yunus ProPOS logo/icon hashes.');
